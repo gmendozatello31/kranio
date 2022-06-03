@@ -1,0 +1,144 @@
+version: '3.7'
+
+x-devendpoint-common: &devendpoint-common
+  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.0.2}
+  environment: &devendpoint-common-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKEND: 'airflow.api.auth.backend.basic_auth'
+    AIRFLOW__CORE__ENABLE_XCOM_PICKLING: 'true'
+    AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: 5
+    AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC: 5
+    HOST_WORKING_DIRECTORY: ${HOST_WORKING_DIRECTORY}
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - /var/run/docker.sock:/var/run/docker.sock
+  user: '${AIRFLOW_UID:-50000}:${AIRFLOW_GID:-50000}'
+  depends_on:
+    redis:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+    glue:
+      condition: service_healthy
+
+services:
+  spark:
+    #image: jupyter/pyspark-notebook
+    image: jupyter/all-spark-notebook:latest
+    ports:
+      - "8888:8888"
+      - "4040-4080:4040-4080"
+    volumes:
+      - ./src:/home/jovyan/work/notebooks/
+
+  # postgres used by airflow
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-U', 'airflow']
+      interval: 5s
+      retries: 5
+    restart: always
+    ports: 
+      - "5432:5432"
+
+  redis:
+    image: redis:latest
+    ports:
+      - 6379:6379
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 30s
+      retries: 50
+    restart: always
+
+  airflow-webserver:
+    <<: *devendpoint-common
+    command: webserver
+    ports:
+      - 8081:8080
+    healthcheck:
+      test: ['CMD', 'curl', '--fail', 'http://localhost:8080/health']
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+  airflow-scheduler:
+    <<: *devendpoint-common
+    command: scheduler
+    restart: always
+
+  airflow-worker:
+    <<: *devendpoint-common
+    command: celery worker
+    restart: always
+
+  airflow-init:
+    <<: *devendpoint-common
+    command: version
+    environment:
+      <<: *devendpoint-common-env
+      _AIRFLOW_DB_UPGRADE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+
+  flower:
+    <<: *devendpoint-common
+    command: celery flower
+    ports:
+      - 5555:5555
+    healthcheck:
+      test: ['CMD', 'curl', '--fail', 'http://localhost:5555/']
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+  docker-proxy:
+    image: bobrik/socat
+    command: 'TCP4-LISTEN:1234,fork,reuseaddr UNIX-CONNECT:/var/run/docker.sock'
+    ports:
+      - '1234:1234'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  onlinestore:
+    image: tiangolo/uvicorn-gunicorn-fastapi
+    command: >
+      bash -c "python -m pip install --upgrade pip 
+      && uvicorn main:app --host 0.0.0.0"
+    ports:
+      - "8082:8000"
+    volumes:
+      - ./mock:/app
+  
+  adminer:
+    container_name: adminer
+    image: adminer:4.8.0
+    restart: always
+    ports:
+      - 8085:8080
+    depends_on: ["postgres"]
+
+volumes:
+  postgres-db-volume:
+
+
+
+  
